@@ -1,0 +1,176 @@
+!pip install deap
+!pip install scikit-learn==1.3.0
+import random
+import numpy as np
+import tensorflow.compat.v1 as tf
+from deap import base, creator, tools, algorithms
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.callbacks import Callback
+from sklearn.metrics import r2_score
+
+# Load dataset
+dataset_FEM = pd.read_csv('adjPrototypeMLdata9.csv')
+
+if __name__ == "__main__":
+    print(dataset_FEM.columns)
+    print(dataset_FEM.columns)
+    print(dataset_FEM.iloc[:, -1:].head())
+
+
+# Separate feature labels, inputs, and output
+input_dataset_FEM = dataset_FEM.iloc[:, :3].values
+
+out_features_dataset_FEM = dataset_FEM.iloc[:, -1:].values
+minVal = min(out_features_dataset_FEM)
+maxVal = max(out_features_dataset_FEM)
+out_features_dataset_FEM = (out_features_dataset_FEM - minVal) / (maxVal - minVal)
+
+X_train_FEM, X_test_FEM, y_train_FEM, y_test_FEM = train_test_split(
+    input_dataset_FEM, out_features_dataset_FEM, test_size=0.3, random_state=42)
+
+
+# Define the DNN architecture
+dnn_model = tf.keras.Sequential([
+    tf.keras.layers.Dense(112, activation='relu', input_shape=(
+        3,), kernel_regularizer=l2(0.01)),
+    Dropout(0.2),
+    tf.keras.layers.Dense(74, activation='relu', kernel_regularizer=l2(0.01)),
+    Dropout(0.2),
+    tf.keras.layers.Dense(1)
+])
+
+# Compile the DNN model
+dnn_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                      loss='mean_squared_logarithmic_error')
+early_stopping = EarlyStopping(monitor='val_loss', patience=100, restore_best_weights=True)
+
+class PredictionHistory(Callback):
+    def __init__(self):
+        super().__init__()
+        self.epoch_predictions_train = []
+        self.epoch_predictions_test = []
+        self.r2_values_train = []
+        self.r2_values_test = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Predictions and R-squared for training set
+        train_predictions = self.model.predict(X_train_FEM)
+        self.epoch_predictions_train.append(train_predictions)
+        y_train_FEM_rescaled = y_train_FEM * (maxVal - minVal) + minVal
+        y_train_pred_rescaled = train_predictions * (maxVal - minVal) + minVal
+        r2_train = r2_score(y_train_FEM_rescaled, y_train_pred_rescaled)
+        self.r2_values_train.append(r2_train)
+
+        # Predictions and R-squared for test set
+        test_predictions = self.model.predict(X_test_FEM)
+        self.epoch_predictions_test.append(test_predictions)
+        y_test_FEM_rescaled = y_test_FEM * (maxVal - minVal) + minVal
+        y_test_pred_rescaled = test_predictions * (maxVal - minVal) + minVal
+        r2_test = r2_score(y_test_FEM_rescaled, y_test_pred_rescaled)
+        self.r2_values_test.append(r2_test)
+
+
+prediction_history = PredictionHistory()
+
+for i in range (1):
+    history_dataset_FEM = dnn_model.fit(
+        X_train_FEM, y_train_FEM, epochs=1000, batch_size=64,
+        validation_data=(X_test_FEM, y_test_FEM),
+		    callbacks=[early_stopping, prediction_history], verbose=0)
+
+print("Training R-squared values:", prediction_history.r2_values_train)
+print("Test R-squared values:", prediction_history.r2_values_test)
+
+# Save the trained model in the .keras format
+dnn_model.save('dnnModel.keras')
+
+epochs = range(1, len(prediction_history.r2_values_train) + 1)  # Start from epoch 1
+
+plt.plot(epochs, prediction_history.r2_values_train, label='Train R-squared')
+plt.plot(epochs, prediction_history.r2_values_test, label='Test R-squared')
+plt.title('R-squared vs Epochs')
+plt.xlabel('Epoch')
+plt.ylabel('R-squared')
+plt.legend()
+plt.show()
+
+def model_predict(input_data):
+    global loaded_model
+    if 'loaded_model' not in globals():
+        loaded_model = tf.keras.models.load_model('dnnModel.keras')
+    prediction = loaded_model.predict(input_data)
+    prediction = prediction * (maxVal - minVal) + minVal
+    return prediction
+
+# Function to retrieve predictions from a specific epoch
+def get_epoch_predictions(epoch_index):
+    if epoch_index < 0 or epoch_index >= len(prediction_history.epoch_predictions):
+        return None  # Handle invalid epoch index
+    return prediction_history.epoch_predictions[epoch_index]
+
+
+# Leave room for future multi-objective optimization
+if not hasattr(creator, "FitnessMulti"):
+    # solely maximizatin problem for now
+    creator.create("FitnessMulti", base.Fitness, weights=(1.0, 1.0))
+    creator.create("Individual", list, fitness=creator.FitnessMulti)
+
+# Surpress any infeasible inputs
+def feasible(individual):
+    # Feasibility function for the individual. Returns True if feasible, False otherwise.
+    if 1.5 <= individual[0] <= 6.75 and 1.5 <= individual[1] <= 4.5 and 0.5 <= individual[2] <= 2.5:
+	    return True
+    return False
+
+def evaluate(individual):
+    input_data = np.array(individual).reshape(1, -1)
+    prediction = model_predict(input_data)
+    #print("Prediction for individual:", prediction)  # for verification only
+    # Get fitness from the predicted result
+    comp1 = prediction[0, :1]
+    comp2 = prediction[0, :1]
+    fit1 = np.max(comp1)
+    fit2 = np.max(comp2)
+    return (fit1, fit2)
+
+toolbox = base.Toolbox()
+
+# Generate the initial individual's attributes
+toolbox.register("attr_length", random.uniform, 1.5, 6.75)
+toolbox.register("attr_width", random.uniform, 1.5, 4.5)
+toolbox.register("attr_height", random.uniform, 0.5, 2.5)
+
+def create_individual():
+    return [toolbox.attr_length(), toolbox.attr_width(),
+            toolbox.attr_height()]
+
+toolbox.register("individual", tools.initIterate,
+                 creator.Individual, create_individual)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+toolbox.register("evaluate", evaluate)
+toolbox.decorate("evaluate", tools.DeltaPenalty(feasible, -10000))
+toolbox.register("mate", tools.cxTwoPoint)
+toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
+# NSGA-II for multi-objective selection
+toolbox.register("select", tools.selNSGA2)
+
+def main():
+    random.seed(64)
+    population = toolbox.population(n=50)
+    ngen = 60  # Number of generations
+    stats = tools.Statistics(lambda ind: ind.fitness.values)
+
+    result, log = algorithms.eaSimple(population, toolbox, cxpb=0.5, mutpb=0.2, ngen=ngen, stats=stats, verbose=True)
+    best_inds = tools.selBest(population, 1)
+    for bi in best_inds:
+        print("The best setting for input:", bi)
+        print("Optimized fitness:", bi.fitness.values)
+    return population, log
+
+final_pop, logbook = main()
